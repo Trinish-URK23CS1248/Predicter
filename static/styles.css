@@ -1,0 +1,6 @@
+body{font-family:Segoe UI, Arial, sans-serif;background:#f6f8fa;color:#111}
+.card{width:760px;margin:36px auto;padding:20px;border-radius:8px;background:#fff;box-shadow:0 6px 20px rgba(16,24,40,0.08)}
+h1{margin-top:0}
+#signal h2{font-size:28px;margin:6px 0}
+.muted{color:#666;font-size:13px}
+pre{background:#f2f4f7;padding:12px;border-radius:6px;overflow:auto}

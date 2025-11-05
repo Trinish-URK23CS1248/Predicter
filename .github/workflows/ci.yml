@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      build_docker:
+        description: 'Set to true to build and upload a Docker image artifact'
+        required: false
+        default: 'false'
+
+jobs:
+  train-and-package:
+    name: Train model & package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install minimal ML deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn joblib
+
+      - name: Create training script
+        run: |
+          cat > train.py << 'PY'
+          import sys
+          import json
+          import pandas as pd
+          import numpy as np
+          from sklearn.ensemble import RandomForestRegressor
+          from sklearn.model_selection import train_test_split
+          from sklearn.metrics import mean_squared_error, r2_score
+          import joblib
+
+          def load_and_preprocess(path):
+              df = pd.read_csv(path, parse_dates=['Date'])
+              df = df.sort_values('Date')
+              df = df[['Date','Open','High','Low','Close','Volume']].dropna()
+              df['Daily_Return'] = df['Close'].pct_change().fillna(0)
+              df['MA_5'] = df['Close'].rolling(window=5).mean().fillna(method='bfill')
+              df['MA_10'] = df['Close'].rolling(window=10).mean().fillna(method='bfill')
+              df['Target'] = df['Close'].shift(-1)
+              df = df.dropna()
+              return df
+
+          if __name__ == '__main__':
+              csv_in = sys.argv[1] if len(sys.argv) > 1 else 'Tesla.csv'
+              out_model = sys.argv[2] if len(sys.argv) > 2 else 'model.joblib'
+              df = load_and_preprocess(csv_in)
+              features = ['Open','High','Low','Close','Volume','Daily_Return','MA_5','MA_10']
+              X = df[features].values
+              y = df['Target'].values
+              X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+              model = RandomForestRegressor(n_estimators=100, random_state=42)
+              model.fit(X_train, y_train)
+              preds = model.predict(X_test)
+              rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
+              r2 = float(r2_score(y_test, preds))
+              joblib.dump({'model': model, 'features': features}, out_model)
+              metrics = {'rmse': rmse, 'r2': r2, 'n_train': len(X_train), 'n_test': len(X_test)}
+              with open('metrics.json','w') as f:
+                  json.dump(metrics, f)
+              print('RMSE:', rmse)
+              print('R2:', r2)
+              print('Saved model to', out_model)
+              print('Saved metrics to metrics.json')
+          PY
+
+      - name: Run training (uses Tesla.csv from repo root)
+        run: |
+          python train.py Tesla.csv model.joblib
+
+      - name: Upload trained model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-model
+          path: model.joblib
+
+      - name: Upload metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-metrics
+          path: metrics.json
+
+      - name: Build Docker image (optional)
+        if: ${{ env.BUILD_DOCKER == 'true' || github.event.inputs.build_docker == 'true' }}
+        run: |
+          # Create a minimal Dockerfile that contains the model as an example deployable image
+          cat > Dockerfile << 'DOCKER'
+          FROM python:3.11-slim
+          WORKDIR /app
+          COPY model.joblib /app/
+          COPY train.py /app/
+          CMD ["python", "-c", "print('Model artifact present:', __import__('os').listdir('/app'))"]
+          DOCKER
+          docker build -t mlops-portal:latest .
+
+      - name: (Optional) Save Docker image as artifact
+        if: ${{ env.BUILD_DOCKER == 'true' || github.event.inputs.build_docker == 'true' }}
+        continue-on-error: true
+        run: |
+          docker save mlops-portal:latest -o mlops-portal.tar || true
+
+      - name: Upload docker image artifact (optional)
+        if: ${{ env.BUILD_DOCKER == 'true' || github.event.inputs.build_docker == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlops-portal-image
+          path: mlops-portal.tar
